@@ -22,8 +22,12 @@ def _get_index(pc: Pinecone, settings: Settings):
     return pc.Index(settings.pinecone_index_name)
 
 
-def ingest_path(path: str | Path, settings: Settings, batch_size: int = 64) -> None:
-    """Ingest documents from ``path`` into Pinecone using OpenAI embeddings."""
+
+def ingest_path(path: str | Path, settings: Settings, batch_size: int = 32) -> None:
+    """Safely ingest documents into Pinecone using small, memory-efficient batches."""
+
+    import time
+    from tqdm import tqdm
 
     client = OpenAI(api_key=settings.openai_api_key)
     pc = _init_pinecone(settings)
@@ -31,46 +35,49 @@ def ingest_path(path: str | Path, settings: Settings, batch_size: int = 64) -> N
 
     files = list(iter_text_files(path))
     if not files:
-        raise ValueError(
-            "No supported documents found. Add .txt or .md files to ingest."
-        )
+        raise ValueError("No supported documents found. Add .txt or .md files to ingest.")
+
+    typer_msg = f"Ingesting {len(files)} file(s) with batch_size={batch_size}..."
+    print(typer_msg)
 
     for file in files:
-        text = file.read_text(encoding="utf-8")
+        try:
+            text = file.read_text(encoding="utf-8")
+        except Exception as e:
+            print(f"⚠️  Skipping {file}: {e}")
+            continue
+
         chunks = chunk_text(text, settings.chunk_size, settings.chunk_overlap)
-        vectors = []
-        for chunk in chunks:
-            vectors.append(
-                {
-                    "id": str(uuid.uuid4()),
-                    "metadata": {
-                        "source": str(file),
-                        "chunk": chunk,
-                    },
-                    "values": None,  # replaced later
-                }
-            )
+        print(f"📄 {file.name}: {len(chunks)} chunks")
 
-        for batch in batched(vectors, batch_size):
-            inputs = [item["metadata"]["chunk"] for item in batch]
-            response = client.embeddings.create(
-                model=settings.embedding_model,
-                input=inputs,
-            )
-            for idx, data in enumerate(response.data):
-                batch[idx]["values"] = data.embedding
+        # Process chunks in small batches to prevent OOM
+        for batch_idx, batch_chunks in enumerate(batched(chunks, batch_size), start=1):
+            try:
+                response = client.embeddings.create(
+                    model=settings.embedding_model,
+                    input=batch_chunks,
+                )
 
-            index.upsert(
-                vectors=[
+                vectors = [
                     {
-                        "id": item["id"],
-                        "values": item["values"],
-                        "metadata": item["metadata"],
+                        "id": str(uuid.uuid4()),
+                        "values": data.embedding,
+                        "metadata": {"source": str(file), "chunk": chunk},
                     }
-                    for item in batch
-                ],
-                namespace=settings.namespace,
-            )
+                    for data, chunk in zip(response.data, batch_chunks)
+                ]
+
+                index.upsert(vectors=vectors, namespace=settings.namespace)
+                print(f"✅  {file.name} batch {batch_idx} ({len(batch_chunks)} chunks) uploaded")
+
+                # brief sleep to avoid API rate limit & memory spikes
+                time.sleep(0.3)
+
+            except Exception as e:
+                print(f"❌  Failed batch {batch_idx} of {file.name}: {e}")
+                time.sleep(1)
+                continue
+
 
 
 def export_ingested_metadata(output_file: str | Path, settings: Settings) -> None:

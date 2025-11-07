@@ -1,6 +1,10 @@
 """Configuration utilities for the RAG chatbot project."""
 
 from __future__ import annotations
+from dotenv import load_dotenv
+
+
+load_dotenv()  # ensure .env is read before any variable check
 
 import os
 from dataclasses import dataclass

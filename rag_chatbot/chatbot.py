@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import List
 
 from openai import OpenAI
-from pinecone import Pinecone
+from pinecone import Pinecone, ServerlessSpec
+
 
 from .config import Settings
 
